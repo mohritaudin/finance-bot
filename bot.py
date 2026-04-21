@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import time
+import pytz
 import gspread
 import google.generativeai as genai
 
@@ -11,21 +12,21 @@ from telegram.ext import Updater, MessageHandler, Filters
 from telegram import Update
 from apscheduler.schedulers.background import BackgroundScheduler
 
-# ====== LOGGING ======
+# ===== LOGGING =====
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# ====== ENV ======
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")
-SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON")
-YOUR_CHAT_ID = os.environ.get("YOUR_CHAT_ID")
+# ===== ENV =====
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
+SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
+YOUR_CHAT_ID = os.getenv("YOUR_CHAT_ID")
 
-# ====== VALIDASI ENV ======
+# ===== VALIDATE ENV =====
 def validate_env():
     required = [
         "TELEGRAM_TOKEN",
@@ -34,27 +35,25 @@ def validate_env():
         "SERVICE_ACCOUNT_JSON",
         "YOUR_CHAT_ID"
     ]
-    
-    missing = [k for k in required if not os.environ.get(k)]
-    
+    missing = [k for k in required if not os.getenv(k)]
     if missing:
         raise Exception(f"ENV missing: {', '.join(missing)}")
 
-# ====== RETRY HELPER ======
+# ===== RETRY =====
 def retry(func, retries=3, delay=2):
     for i in range(retries):
         try:
             return func()
         except Exception as e:
-            logger.warning(f"Retry {i+1}/{retries} failed: {e}")
+            logger.warning(f"Retry {i+1}: {e}")
             time.sleep(delay)
     raise Exception("Max retry reached")
 
-# ====== GEMINI SETUP ======
+# ===== GEMINI =====
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-1.5-flash")
 
-# ====== GOOGLE SHEETS ======
+# ===== GOOGLE SHEETS =====
 def get_sheet():
     def _get():
         creds_dict = json.loads(SERVICE_ACCOUNT_JSON)
@@ -67,10 +66,9 @@ def get_sheet():
         )
         client = gspread.authorize(creds)
         return client.open_by_key(SPREADSHEET_ID)
-
     return retry(_get)
 
-# ====== GET FINANCIAL ======
+# ===== DATA =====
 def get_financial_summary():
     try:
         sheet = get_sheet()
@@ -81,159 +79,90 @@ def get_financial_summary():
 
         bulan_ini = datetime.now().strftime("%Y-%m")
 
+        def to_int(val):
+            return int(str(val).replace(".", "").replace(",", ""))
+
         pemasukan = sum(
-            int(str(r["Nominal"]).replace(".", "").replace(",", ""))
+            to_int(r["Nominal"])
             for r in transaksi
             if r["Tipe"] == "pemasukan" and str(r["Tanggal"]).startswith(bulan_ini)
         )
 
         pengeluaran = sum(
-            int(str(r["Nominal"]).replace(".", "").replace(",", ""))
+            to_int(r["Nominal"])
             for r in transaksi
             if r["Tipe"] == "pengeluaran" and str(r["Tanggal"]).startswith(bulan_ini)
         )
 
         sisa = pemasukan - pengeluaran
 
-        rencana_belum = [r for r in rencana if r.get("Status") == "belum"]
-
-        total_rencana = sum(
-            int(str(r["Nominal"]).replace(".", "").replace(",", ""))
-            for r in rencana_belum
-        )
-
         return {
             "pemasukan": pemasukan,
             "pengeluaran": pengeluaran,
-            "sisa": sisa,
-            "wishlist": wishlist,
-            "rencana_belum": rencana_belum,
-            "total_rencana": total_rencana,
-            "sisa_setelah_rencana": sisa - total_rencana,
-            "semua_transaksi": transaksi
+            "sisa": sisa
         }
 
-    except Exception as e:
-        logger.exception("Error get_financial_summary")
+    except Exception:
+        logger.exception("Financial error")
         return None
 
-# ====== ADD TO SHEET ======
-def add_to_sheet(worksheet_name, row_data):
+# ===== AI =====
+def process_with_ai(msg, data):
     try:
-        sheet = get_sheet()
-        ws = sheet.worksheet(worksheet_name)
-        retry(lambda: ws.append_row(row_data))
-        return True
-    except Exception as e:
-        logger.exception("Error add_to_sheet")
-        return False
-
-# ====== AI PROCESS ======
-def process_with_ai(user_message, financial_data):
-    try:
-        today = datetime.now().strftime("%Y-%m-%d")
-
         prompt = f"""
-Kamu adalah asisten keuangan pribadi berbahasa Indonesia.
+Pemasukan: {data['pemasukan']}
+Pengeluaran: {data['pengeluaran']}
+Sisa: {data['sisa']}
 
-Hari ini: {today}
+User: {msg}
 
-Data:
-- Pemasukan: Rp {financial_data['pemasukan']:,}
-- Pengeluaran: Rp {financial_data['pengeluaran']:,}
-- Sisa: Rp {financial_data['sisa']:,}
-
-Pesan: "{user_message}"
-
-Balas dalam JSON:
-{{
-  "intent": "...",
-  "action": {{"type": "...", "data": {{}}}},
-  "response": "..."
-}}
+Balas JSON:
+{{"response":"..."}}
 """
 
-        response = model.generate_content(
-            prompt,
-            request_options={"timeout": 10}
-        )
-
-        text = response.text.strip()
+        res = model.generate_content(prompt, request_options={"timeout": 10})
+        text = res.text.strip()
 
         if "```" in text:
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.strip()
+            text = text.split("```")[1].replace("json", "").strip()
 
-        try:
-            return json.loads(text)
-        except Exception:
-            logger.error(f"Invalid JSON AI: {text}")
-            return {
-                "intent": "error",
-                "action": {"type": "tidak_ada"},
-                "response": "⚠️ AI tidak memberikan respon valid."
-            }
+        return json.loads(text)
 
-    except Exception as e:
-        logger.exception("Gemini error")
-        return {
-            "intent": "error",
-            "action": {"type": "tidak_ada"},
-            "response": "❌ AI error, coba lagi nanti."
-        }
+    except Exception:
+        logger.exception("AI error")
+        return {"response": "⚠️ AI error"}
 
-# ====== HANDLER ======
+# ===== HANDLER =====
 def handle_message(update: Update, context):
     try:
-        user_message = update.message.text
         chat_id = str(update.message.chat_id)
 
         if YOUR_CHAT_ID and chat_id != YOUR_CHAT_ID:
-            update.message.reply_text("Bot privat.")
             return
 
         update.message.reply_text("⏳ Processing...")
 
-        financial_data = get_financial_summary()
-        if not financial_data:
-            update.message.reply_text("❌ Gagal ambil data.")
+        data = get_financial_summary()
+        if not data:
+            update.message.reply_text("❌ Data error")
             return
 
-        result = process_with_ai(user_message, financial_data)
-
-        action = result.get("action", {})
-
-        try:
-            if action.get("type") == "tambah_transaksi":
-                d = action["data"]
-                add_to_sheet("Transaksi", [
-                    d.get("tanggal", datetime.now().strftime("%Y-%m-%d")),
-                    d.get("tipe", ""),
-                    d.get("kategori", ""),
-                    d.get("deskripsi", ""),
-                    d.get("nominal", 0)
-                ])
-
-        except Exception:
-            logger.exception("Action error")
-
+        result = process_with_ai(update.message.text, data)
         update.message.reply_text(result.get("response", "OK"))
 
     except Exception:
-        logger.exception("FATAL ERROR")
-        update.message.reply_text("❌ Error sistem")
+        logger.exception("Handler error")
+        update.message.reply_text("❌ Error")
 
-# ====== SCHEDULER ======
-def send_monthly_summary(bot):
+# ===== SCHEDULER =====
+def send_summary(bot):
     try:
         data = get_financial_summary()
         if not data:
             return
 
         msg = f"""
-📊 RANGKUMAN
+📊 SUMMARY
 Pemasukan: {data['pemasukan']}
 Pengeluaran: {data['pengeluaran']}
 Sisa: {data['sisa']}
@@ -243,7 +172,7 @@ Sisa: {data['sisa']}
     except Exception:
         logger.exception("Scheduler error")
 
-# ====== MAIN ======
+# ===== MAIN =====
 def main():
     validate_env()
 
@@ -252,14 +181,20 @@ def main():
 
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
 
-    scheduler = BackgroundScheduler()
+    scheduler = BackgroundScheduler(
+        timezone=pytz.timezone("Asia/Jakarta")
+    )
+
     scheduler.add_job(
-        send_monthly_summary,
+        send_summary,
         "cron",
         day=1,
         hour=8,
+        minute=0,
+        timezone=pytz.timezone("Asia/Jakarta"),
         args=[updater.bot]
     )
+
     scheduler.start()
 
     logger.info("Bot running...")
