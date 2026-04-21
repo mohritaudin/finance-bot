@@ -2,5 +2,5 @@ python-telegram-bot==13.15
 google-generativeai==0.3.2
 gspread==5.12.0
 google-auth==2.25.2
-APScheduler==3.10.4
+APScheduler==3.6.3
 python-dotenv==1.0.0
