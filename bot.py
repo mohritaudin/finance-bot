@@ -212,7 +212,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Terjadi error: {str(e)}")
 
 # ====== RANGKUMAN BULANAN ======
-async def send_monthly_summary(app):
+async def send_monthly_summary(app=None):
     try:
         financial_data = get_financial_summary()
         bulan = datetime.now().strftime("%B %Y")
@@ -242,19 +242,21 @@ Format:
 """
         response = model.generate_content(prompt)
         
-        await app.bot.send_message(
-            chat_id=YOUR_CHAT_ID,
-            text=response.text
-        )
+        if app:
+            await app.send_message(chat_id=YOUR_CHAT_ID, text=response.text)
     except Exception as e:
         logger.error(f"Error monthly summary: {e}")
 
 # ====== MAIN ======
 def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    from telegram.ext import Updater, MessageHandler, Filters
     
-    # Scheduler untuk rangkuman bulanan (setiap tanggal 1, jam 08:00)
+    updater = Updater(token=TELEGRAM_TOKEN)
+    dispatcher = updater.dispatcher
+    
+    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+    
+    # Scheduler
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         send_monthly_summary,
@@ -262,12 +264,13 @@ def main():
         day=1,
         hour=8,
         minute=0,
-        args=[app]
+        kwargs={"app": updater.bot}
     )
     scheduler.start()
     
     logger.info("Bot berjalan...")
-    app.run_polling()
+    updater.start_polling()
+    updater.idle()
 
 if __name__ == "__main__":
     main()
