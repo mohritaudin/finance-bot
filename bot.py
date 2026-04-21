@@ -3,11 +3,11 @@ import json
 import logging
 import gspread
 import google.generativeai as genai
-from datetime import datetime, date
+from datetime import datetime
 from google.oauth2.service_account import Credentials
+from telegram.ext import Updater, MessageHandler, Filters
 from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.schedulers.background import BackgroundScheduler
 
 # ====== LOGGING ======
 logging.basicConfig(level=logging.INFO)
@@ -46,6 +46,7 @@ def get_financial_summary():
         rencana = sheet.worksheet("Rencana").get_all_records()
 
         bulan_ini = datetime.now().strftime("%Y-%m")
+
         pemasukan = sum(
             int(str(r["Nominal"]).replace(".", "").replace(",", ""))
             for r in transaksi
@@ -92,7 +93,7 @@ def add_to_sheet(worksheet_name, row_data):
 # ====== PROSES PESAN DENGAN AI ======
 def process_with_ai(user_message, financial_data):
     today = datetime.now().strftime("%Y-%m-%d")
-    
+
     prompt = f"""
 Kamu adalah asisten keuangan pribadi yang ramah dan berbahasa Indonesia.
 Hari ini: {today}
@@ -114,7 +115,7 @@ Tugasmu:
 3. Berikan respons yang ramah dan informatif
 4. Jika ditanya apakah bisa beli sesuatu, analisis berdasarkan data keuangan
 
-Balas dalam format JSON:
+Balas dalam format JSON murni tanpa markdown, tanpa backtick:
 {{
   "intent": "...",
   "action": {{
@@ -134,40 +135,42 @@ Balas dalam format JSON:
   "response": "pesan balasan ke pengguna"
 }}
 """
-    
+
     response = model.generate_content(prompt)
     text = response.text.strip()
-    
+
     # Bersihkan markdown jika ada
-    if text.startswith("```"):
+    if "```" in text:
         text = text.split("```")[1]
         if text.startswith("json"):
             text = text[4:]
-    
-    return json.loads(text.strip())
+        text = text.strip()
+
+    return json.loads(text)
 
 # ====== HANDLER PESAN ======
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def handle_message(update: Update, context):
     user_message = update.message.text
     chat_id = str(update.message.chat_id)
-    
+
     # Keamanan: hanya terima dari chat ID kamu
     if YOUR_CHAT_ID and chat_id != YOUR_CHAT_ID:
-        await update.message.reply_text("Maaf, bot ini bersifat privat.")
+        update.message.reply_text("Maaf, bot ini bersifat privat.")
         return
 
-    await update.message.reply_text("⏳ Sedang memproses...")
+    update.message.reply_text("⏳ Sedang memproses...")
 
     try:
         financial_data = get_financial_summary()
         if not financial_data:
-            await update.message.reply_text("❌ Gagal mengambil data keuangan.")
+            update.message.reply_text("❌ Gagal mengambil data keuangan.")
             return
 
         result = process_with_ai(user_message, financial_data)
-        
+
         # Eksekusi aksi jika ada
         action = result.get("action", {})
+
         if action.get("type") == "tambah_transaksi":
             d = action["data"]
             success = add_to_sheet("Transaksi", [
@@ -178,7 +181,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 d.get("nominal", 0)
             ])
             if not success:
-                await update.message.reply_text("❌ Gagal menyimpan ke spreadsheet.")
+                update.message.reply_text("❌ Gagal menyimpan ke spreadsheet.")
                 return
 
         elif action.get("type") == "tambah_wishlist":
@@ -190,7 +193,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "diinginkan"
             ])
             if not success:
-                await update.message.reply_text("❌ Gagal menyimpan ke spreadsheet.")
+                update.message.reply_text("❌ Gagal menyimpan ke spreadsheet.")
                 return
 
         elif action.get("type") == "tambah_rencana":
@@ -202,21 +205,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "belum"
             ])
             if not success:
-                await update.message.reply_text("❌ Gagal menyimpan ke spreadsheet.")
+                update.message.reply_text("❌ Gagal menyimpan ke spreadsheet.")
                 return
 
-        await update.message.reply_text(result.get("response", "✅ Selesai!"))
+        update.message.reply_text(result.get("response", "✅ Selesai!"))
 
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON parse error: {e}")
+        update.message.reply_text("❌ Gagal memproses respons AI. Coba ulangi pesanmu.")
     except Exception as e:
         logger.error(f"Error: {e}")
-        await update.message.reply_text(f"❌ Terjadi error: {str(e)}")
+        update.message.reply_text(f"❌ Terjadi error: {str(e)}")
 
 # ====== RANGKUMAN BULANAN ======
-async def send_monthly_summary(app=None):
+def send_monthly_summary(bot):
     try:
         financial_data = get_financial_summary()
+        if not financial_data:
+            return
+
         bulan = datetime.now().strftime("%B %Y")
-        
+
         prompt = f"""
 Buat rangkuman keuangan bulan {bulan} yang informatif dan berikan saran dalam bahasa Indonesia.
 
@@ -226,48 +235,45 @@ Data:
 - Sisa: Rp {financial_data['sisa']:,}
 - Semua transaksi: {json.dumps(financial_data['semua_transaksi'], ensure_ascii=False)}
 
-Format:
+Buat dalam format berikut:
 📊 RANGKUMAN BULAN {bulan.upper()}
-[rangkuman singkat]
+[rangkuman singkat 2-3 kalimat]
 
-💰 PEMASUKAN: ...
-💸 PENGELUARAN: ...
-💵 SISA: ...
+💰 PEMASUKAN: Rp ...
+💸 PENGELUARAN: Rp ...
+💵 SISA: Rp ...
 
 📈 ANALISIS:
 [analisis pengeluaran terbesar, pola belanja, dll]
 
-💡 SARAN:
-[3-5 saran spesifik untuk bulan depan]
+💡 SARAN BULAN DEPAN:
+[3-5 saran spesifik yang actionable]
 """
         response = model.generate_content(prompt)
-        
-        if app:
-            await app.send_message(chat_id=YOUR_CHAT_ID, text=response.text)
+        bot.send_message(chat_id=YOUR_CHAT_ID, text=response.text)
+
     except Exception as e:
         logger.error(f"Error monthly summary: {e}")
 
 # ====== MAIN ======
 def main():
-    from telegram.ext import Updater, MessageHandler, Filters
-    
-    updater = Updater(token=TELEGRAM_TOKEN)
+    updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
     dispatcher = updater.dispatcher
-    
+
     dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-    
-    # Scheduler
-    scheduler = AsyncIOScheduler()
+
+    # Scheduler untuk rangkuman bulanan (setiap tanggal 1, jam 08:00)
+    scheduler = BackgroundScheduler()
     scheduler.add_job(
         send_monthly_summary,
         "cron",
         day=1,
         hour=8,
         minute=0,
-        kwargs={"app": updater.bot}
+        args=[updater.bot]
     )
     scheduler.start()
-    
+
     logger.info("Bot berjalan...")
     updater.start_polling()
     updater.idle()
