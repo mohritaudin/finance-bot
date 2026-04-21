@@ -126,27 +126,47 @@ def get_financial_summary():
 def process_with_ai(msg, data):
     try:
         prompt = f"""
+Balas dengan JSON VALID tanpa teks tambahan.
+
+Format:
+{{"response":"..."}} 
+
+Data:
 Pemasukan: {data['pemasukan']}
 Pengeluaran: {data['pengeluaran']}
 Sisa: {data['sisa']}
 
 User: {msg}
-
-Balas JSON:
-{{"response":"..."}}
 """
 
-        res = model.generate_content(prompt, request_options={"timeout": 10})
+        res = model.generate_content(
+            prompt,
+            request_options={"timeout": 10}
+        )
+
+        if not res or not res.text:
+            raise Exception("Empty response from AI")
+
         text = res.text.strip()
 
+        print("RAW AI:", text)
+
+        # bersihin markdown
         if "```" in text:
             text = text.split("```")[1].replace("json", "").strip()
 
-        return json.loads(text)
+        try:
+            return json.loads(text)
+        except:
+            return {
+                "response": text  # fallback langsung tampilkan
+            }
 
-    except Exception:
-        logger.exception("AI error")
-        return {"response": "⚠️ AI error"}
+    except Exception as e:
+        print("🔥 AI ERROR:", str(e))
+        return {
+            "response": "⚠️ AI lagi bermasalah, coba lagi"
+        }
 
 # ===== HANDLER =====
 def handle_message(update: Update, context):
@@ -217,6 +237,7 @@ def main():
 
     updater.start_polling()
     updater.idle()
+    print("GEMINI KEY:", GEMINI_API_KEY[:10])
 
 if __name__ == "__main__":
     main()
