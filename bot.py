@@ -73,37 +73,53 @@ def get_financial_summary():
     try:
         sheet = get_sheet()
 
-        transaksi = retry(lambda: sheet.worksheet("Transaksi").get_all_records())
-        wishlist = retry(lambda: sheet.worksheet("Wishlist").get_all_records())
-        rencana = retry(lambda: sheet.worksheet("Rencana").get_all_records())
+        print("STEP 1: sheet connected")
 
-        bulan_ini = datetime.now().strftime("%Y-%m")
+        ws = sheet.worksheet("Transaksi")
+        print("STEP 2: worksheet found")
+
+        data = ws.get_all_records()
+        print("STEP 3: data fetched:", data)
+
+        if not data:
+            print("STEP 4: data kosong")
+            return {
+                "pemasukan": 0,
+                "pengeluaran": 0,
+                "sisa": 0
+            }
 
         def to_int(val):
-            return int(str(val).replace(".", "").replace(",", ""))
+            try:
+                return int(str(val).replace(".", "").replace(",", ""))
+            except Exception as e:
+                print("ERROR PARSE NOMINAL:", val, e)
+                return 0
 
         pemasukan = sum(
-            to_int(r["Nominal"])
-            for r in transaksi
-            if r["Tipe"] == "pemasukan" and str(r["Tanggal"]).startswith(bulan_ini)
+            to_int(r.get("Nominal", 0))
+            for r in data
+            if r.get("Tipe") == "pemasukan"
         )
 
         pengeluaran = sum(
-            to_int(r["Nominal"])
-            for r in transaksi
-            if r["Tipe"] == "pengeluaran" and str(r["Tanggal"]).startswith(bulan_ini)
+            to_int(r.get("Nominal", 0))
+            for r in data
+            if r.get("Tipe") == "pengeluaran"
         )
 
-        sisa = pemasukan - pengeluaran
+        print("STEP 5: success")
 
         return {
             "pemasukan": pemasukan,
             "pengeluaran": pengeluaran,
-            "sisa": sisa
+            "sisa": pemasukan - pengeluaran
         }
 
-    except Exception:
-        logger.exception("Financial error")
+    except Exception as e:
+        print("🔥 ERROR BESAR:", str(e))
+        import traceback
+        traceback.print_exc()
         return None
 
 # ===== AI =====
