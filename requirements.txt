@@ -4,7 +4,7 @@ six==1.16.0
 setuptools==70.0.0
 pytz==2024.1
 
-google-generativeai==0.3.2
+google-generativeai>=0.7.0
 gspread==5.12.0
 google-auth==2.25.2
 APScheduler==3.6.3
