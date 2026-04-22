@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import time
+import traceback
 import pytz
 import gspread
 import google.generativeai as genai
@@ -25,6 +26,8 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
 YOUR_CHAT_ID = os.getenv("YOUR_CHAT_ID")
+
+print("GEMINI KEY:", GEMINI_API_KEY[:10] if GEMINI_API_KEY else "NONE")
 
 # ===== VALIDATE ENV =====
 def validate_env():
@@ -51,12 +54,18 @@ def retry(func, retries=3, delay=2):
 
 # ===== GEMINI =====
 genai.configure(api_key=GEMINI_API_KEY)
+
+# pakai model stabil
 model = genai.GenerativeModel("gemini-1.5-flash")
 
 # ===== GOOGLE SHEETS =====
 def get_sheet():
     def _get():
         creds_dict = json.loads(SERVICE_ACCOUNT_JSON)
+
+        # FIX newline private key
+        creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+
         creds = Credentials.from_service_account_info(
             creds_dict,
             scopes=[
@@ -66,23 +75,19 @@ def get_sheet():
         )
         client = gspread.authorize(creds)
         return client.open_by_key(SPREADSHEET_ID)
+
     return retry(_get)
 
 # ===== DATA =====
 def get_financial_summary():
     try:
         sheet = get_sheet()
-
-        print("STEP 1: sheet connected")
-
         ws = sheet.worksheet("Transaksi")
-        print("STEP 2: worksheet found")
 
         data = ws.get_all_records()
-        print("STEP 3: data fetched:", data)
+        print("DATA:", data)
 
         if not data:
-            print("STEP 4: data kosong")
             return {
                 "pemasukan": 0,
                 "pengeluaran": 0,
@@ -92,23 +97,20 @@ def get_financial_summary():
         def to_int(val):
             try:
                 return int(str(val).replace(".", "").replace(",", ""))
-            except Exception as e:
-                print("ERROR PARSE NOMINAL:", val, e)
+            except:
                 return 0
 
         pemasukan = sum(
-            to_int(r.get("Nominal", 0))
+            to_int(r.get("Nominal"))
             for r in data
             if r.get("Tipe") == "pemasukan"
         )
 
         pengeluaran = sum(
-            to_int(r.get("Nominal", 0))
+            to_int(r.get("Nominal"))
             for r in data
             if r.get("Tipe") == "pengeluaran"
         )
-
-        print("STEP 5: success")
 
         return {
             "pemasukan": pemasukan,
@@ -117,8 +119,7 @@ def get_financial_summary():
         }
 
     except Exception as e:
-        print("🔥 ERROR BESAR:", str(e))
-        import traceback
+        print("🔥 SHEET ERROR:", str(e))
         traceback.print_exc()
         return None
 
@@ -126,10 +127,7 @@ def get_financial_summary():
 def process_with_ai(msg, data):
     try:
         prompt = f"""
-Balas dengan JSON VALID tanpa teks tambahan.
-
-Format:
-{{"response":"..."}} 
+Jawab singkat dan jelas.
 
 Data:
 Pemasukan: {data['pemasukan']}
@@ -139,38 +137,40 @@ Sisa: {data['sisa']}
 User: {msg}
 """
 
+        print("=== CALL GEMINI ===")
+
         res = model.generate_content(
             prompt,
             request_options={"timeout": 10}
         )
 
-        if not res or not res.text:
-            raise Exception("Empty response from AI")
+        print("=== RESPONSE OBJECT ===", res)
 
-        text = res.text.strip()
+        if not res:
+            raise Exception("Response kosong")
 
-        print("RAW AI:", text)
+        if not hasattr(res, "text") or not res.text:
+            raise Exception(f"Tidak ada text. Full response: {res}")
 
-        # bersihin markdown
-        if "```" in text:
-            text = text.split("```")[1].replace("json", "").strip()
+        print("=== RAW TEXT ===", res.text)
 
-        try:
-            return json.loads(text)
-        except:
-            return {
-                "response": text  # fallback langsung tampilkan
-            }
+        return {
+            "response": res.text
+        }
 
     except Exception as e:
-        print("🔥 AI ERROR:", str(e))
+        print("🔥 GEMINI ERROR:", str(e))
+        traceback.print_exc()
+
         return {
-            "response": "⚠️ AI lagi bermasalah, coba lagi"
+            "response": f"❌ AI ERROR: {str(e)}"
         }
 
 # ===== HANDLER =====
 def handle_message(update: Update, context):
     try:
+        print("=== MASUK HANDLE ===")
+
         chat_id = str(update.message.chat_id)
 
         if YOUR_CHAT_ID and chat_id != YOUR_CHAT_ID:
@@ -179,16 +179,19 @@ def handle_message(update: Update, context):
         update.message.reply_text("⏳ Processing...")
 
         data = get_financial_summary()
+
         if not data:
             update.message.reply_text("❌ Data error")
             return
 
         result = process_with_ai(update.message.text, data)
+
         update.message.reply_text(result.get("response", "OK"))
 
-    except Exception:
-        logger.exception("Handler error")
-        update.message.reply_text("❌ Error")
+    except Exception as e:
+        print("🔥 HANDLER ERROR:", str(e))
+        traceback.print_exc()
+        update.message.reply_text("❌ Error sistem")
 
 # ===== SCHEDULER =====
 def send_summary(bot):
@@ -206,13 +209,17 @@ Sisa: {data['sisa']}
         bot.send_message(chat_id=YOUR_CHAT_ID, text=msg)
 
     except Exception:
-        logger.exception("Scheduler error")
+        traceback.print_exc()
 
 # ===== MAIN =====
 def main():
     validate_env()
 
     updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
+
+    # FIX conflict polling
+    updater.bot.delete_webhook()
+
     dp = updater.dispatcher
 
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
@@ -233,11 +240,10 @@ def main():
 
     scheduler.start()
 
-    logger.info("Bot running...")
+    print("🚀 BOT RUNNING")
 
     updater.start_polling()
     updater.idle()
-    print("GEMINI KEY:", GEMINI_API_KEY[:10])
 
 if __name__ == "__main__":
     main()
