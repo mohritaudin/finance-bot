@@ -56,7 +56,7 @@ def retry(func, retries=3, delay=2):
 genai.configure(api_key=GEMINI_API_KEY)
 
 # pakai model stabil
-model = genai.GenerativeModel("gemini-1.5-flash")
+model = genai.GenerativeModel("gemini-pro")
 
 # ===== GOOGLE SHEETS =====
 def get_sheet():
