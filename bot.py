@@ -139,10 +139,7 @@ User: {msg}
 
         print("=== CALL GEMINI ===")
 
-        res = model.generate_content(
-            prompt,
-            request_options={"timeout": 10}
-        )
+        res = model.generate_content(prompt)
 
         print("=== RESPONSE OBJECT ===", res)
 
